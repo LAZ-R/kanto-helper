@@ -1,0 +1,283 @@
+.lzr {
+  .page-container.guide-page {
+    gap: 16px;
+    
+    .lzr-drawer > .tile-header {
+      align-items: center;
+      h2.header-title, h3.header-title, h4.header-title {
+        margin-bottom: 0;
+        display: flex;
+        flex-direction: row;
+        justify-content: flex-start;
+        align-items: center;
+      }
+    }
+  
+    .lzr-drawer {
+      margin-top: 16px;
+      margin-bottom: 16px;
+      p {
+        /* margin-bottom: 8px; */
+      }
+      p+h4, b+h4, b+p {
+        margin-top: 16px;
+      }
+
+      li>ul {
+        margin-bottom: 0;
+      }
+
+      .inner-body.gapped-boddy {
+        /* background-color: magenta; */
+        gap: 8px;
+      }
+    }
+
+    .gyms-container {
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: flex-start;
+      width: 100%;
+      gap: 8px;
+
+      .lzr-drawer {
+        margin-top: 0;
+        margin-bottom: 0;
+      }
+
+    }
+    .gym-container {
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: flex-start;
+      width: 100%;
+      /* background-color: var(--color--bg-default);
+      padding: 8px;
+      border-radius: var(--border-radius--default); */
+
+      .top-area {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        gap: 8px;
+        margin: 0 auto 16px auto;
+        /* border: 1px solid var(--color--fg-default);
+        border-radius: var(--border-radius--default);
+        padding: 4px 8px; */
+
+        img {
+          height: 24px;
+          /* filter: grayscale(1); */
+        }
+      }
+
+    }
+    .gym-champion-container {
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: flex-start;
+      width: 100%;
+      gap: 8px;
+
+      .champion-identity {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        text-align: center;
+        width: 100%;
+        height: 112px;
+
+        .left-area {
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          align-items: center;
+          gap: 8px;
+          text-align: center;
+          width: 50%;
+          height: 100%;
+          border-right: 1px solid var(--color--fg-default);
+        }
+        .right-area {
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          align-items: center;
+          gap: 8px;
+          text-align: center;
+          width: 50%;
+          height: 100%;
+        }
+      }
+
+      .champion-pokemons {
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        align-items: flex-start;
+        width: 100%;
+        /* background-color: yellow; */
+        gap: 8px;
+
+        .gym-champion-pokemon-container {
+          display: flex;
+          flex-direction: column;
+          justify-content: flex-start;
+          align-items: flex-start;
+          width: 100%;
+          /* background-color: orange; */
+
+          &:not(:last-child) {
+            padding-bottom: 8px;
+            border-bottom: 1px dashed var(--color--fg-default);
+          }
+
+          ul {
+            margin-bottom: 0;
+          }
+
+          .pokemon-line {
+            display: flex;
+            justify-content: flex-start;
+            align-items: center;
+            width: 100%;
+            text-decoration: none;
+            color: var(--color--fg-default);
+            gap: 8px;
+            margin-bottom: 8px;
+
+            .id-container {
+              display: flex;
+              font-family: 'consolas';
+              font-size: 20px;
+            }
+
+            .sprite-container {
+              --size: 56px;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              min-width: var(--size); width: var(--size); max-width: var(--size);
+              min-height: var(--size); height: var(--size); max-height: var(--size);
+              background-color: white;
+              border-radius: var(--border-radius--default);
+
+              img {
+                height: 80%;
+              }
+            }
+
+            .name-container {
+              display: flex;
+              justify-content: flex-start;
+              align-items: center;
+              font-weight: 600;
+              text-transform: uppercase;
+              white-space: nowrap;
+            }
+
+            .types-container {
+              display: flex;
+              justify-content: flex-end;
+              align-items: center;
+              margin-left: auto;
+              height: 100%;
+              gap: 4px;
+
+              .type-badge {
+                --size: 24px;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    .starter-choice {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      width: 100%;
+      gap: 8px;
+      margin-bottom: 16px;
+
+      button {
+        padding-block: 0px;
+        padding-inline: 0px;
+        margin: 0;
+        border: none;
+        padding: 4px;
+        border-radius: var(--border-radius--default);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        opacity: .33;
+        filter: grayscale(1);
+        background-color: white;
+
+        &.selected {
+          opacity: 1;
+          filter: grayscale(0);
+        }
+      }
+    }
+
+    .inner-body.script-container {
+      font-size: 14px;
+      line-height: 22px;
+
+      p {
+        width: 100%;
+      }
+
+      p:not(:last-child) {
+        /* margin-bottom: 8px;
+        padding-bottom: 8px;
+        border-bottom: 1px dashed var(--color--fg-default); */
+      }
+
+      .city, .road, .major-site, .minor-site, .gym, .gold {
+        padding: 2px 4px;
+        font-weight: 600;
+        border-radius: var(--border-radius--default);
+      }
+      .city {
+        background-color: var(--color--fg-default);
+        color: var(--color--bg-default);
+      }
+      .road {
+        background-color: var(--color--bg-default);
+      }
+      .major-site {
+        background-color: var(--color--outline--info);
+      }
+      .minor-site {
+        background-color: var(--color--outline--success);
+      }
+      .gold {
+        background-color: hsla(40, 100%, 40%, .33);
+      }
+
+      .gym {
+        background-color: var(--color--bg-default);
+
+        img {
+          height: 17px;
+          transform: translateY(3.3px);
+          margin-left: 8px;
+        }
+      }
+
+      .lzr-drawer .inner-body {
+        font-size: 14px;
+      }
+    }
+
+
+
+  }
+}

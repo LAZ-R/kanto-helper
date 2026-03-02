@@ -1,0 +1,103 @@
+.city-name, .gym-name, .major-site-name, .minor-site-name, .road-name {
+  --left: 0px;
+  --top: 0px;
+  --scale: 1;
+  --stroke-width: 32px;
+  position: absolute;
+  text-align: center;
+  color: #fff;
+  -webkit-text-stroke: var(--stroke-width) #000;
+  paint-order: stroke fill; /* pas partout */
+  font-weight: 600;
+  left: var(--left);
+  top: var(--top);
+  transform: translate(-50%, -50%) scale(var(--scale));
+  transition: transform .2s linear;
+
+  &.hidden {
+    display: none;
+  }  
+}
+
+.city-name {
+  --stroke-width: 32px;
+  font-size: 256px;
+  line-height: 256px;
+}
+
+.gym-name {
+  --stroke-width: 3px;
+  font-size: 16px;
+  line-height: 16px;
+
+  img {
+    transform: translateY(2px);
+  }
+}
+
+.major-site-name {
+  --stroke-width: 16px;
+  font-size: 128px;
+  line-height: 128px;
+}
+
+.minor-site-name {
+  --stroke-width: 12px;
+  font-size: 64px;
+  line-height: 64px;
+}
+
+.road-name {
+  --stroke-width: 24px;
+  font-size: 172px;
+  line-height: 172px;
+}
+
+.contextual-menu {
+  --height: 150px;
+  position: absolute;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: flex-start;
+  width: calc(100% - calc(var(--horizontal-padding) * 2));
+  height: var(--height);
+  background-color: var(--color--bg-html);
+  left: var(--horizontal-padding);
+  border-radius: var(--border-radius--default) var(--border-radius--default) 0 0;
+  padding: 8px;
+  transition: bottom .2s linear;
+  border: 2px solid var(--color--fg-default);
+  border-bottom: none;
+
+  &.hidden {
+    bottom: calc(0px - var(--height));
+  }
+
+  .top-area {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    width: 100%;
+
+    #contextualMenuTitle {
+      /* text-wrap: nowrap; */
+      --stroke-width: 4px;
+      font-size: 24px;
+      font-weight: 600;
+      /* line-height: 24px;
+      color: #fff;
+      -webkit-text-stroke: var(--stroke-width) #000;
+      paint-order: stroke fill; */
+      color: var(--color--fg-default);
+    }
+  }
+  .contextual-menu-body {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    width: 100%;
+    padding-top: 16px;
+  }
+}

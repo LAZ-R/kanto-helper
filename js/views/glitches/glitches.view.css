@@ -1,0 +1,25 @@
+.lzr {
+  .page-container.glitches {
+    gap: 16px;
+    
+    .lzr-drawer > .tile-header {
+      align-items: center;
+      h2.header-title {
+        margin-bottom: 0;
+      }
+    }
+  
+    .lzr-drawer {
+      p {
+        margin-bottom: 8px;
+      }
+      p+h4, b+h4, b+p {
+        margin-top: 16px;
+      }
+
+      li>ul {
+        margin-bottom: 0;
+      }
+    }
+  }
+}

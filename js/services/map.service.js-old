@@ -1,0 +1,925 @@
+/**
+ * Map Service
+ * -----------
+ * Objectif :
+ * - Interaction type Google Maps/Leaflet : pan 1 doigt, pinch 2 doigts, zoom centré sous les doigts
+ * - Bornes souples (rebond) pour éviter de perdre la map
+ * - MIN_SCALE = "contain" : dézoom mini = map entièrement visible
+ * - État persistant (originX/originY/scale) quand on revient sur la page
+ * - NOUVEAU : initial view "device-independent" :
+ *   -> on définit un point (X,Y) en pixels de la map non-scalée à afficher au centre du viewport.
+ *
+ * Règle importante :
+ * - Les coordonnées "map" (centerMapX/centerMapY) sont exprimées dans le repère de la map à scale=1
+ *   (donc en px de la div .map, qui correspond idéalement à l'image d'origine / ton repère logique).
+ */
+
+// Bus d'événements interne au service
+export const mapEvents = new EventTarget();
+
+// Nom d'événement pour le zoom
+export const MAP_ZOOM_CHANGE_EVENT = 'map:zoom-change';
+
+function emitZoomChange(newScale) {
+  mapEvents.dispatchEvent(new CustomEvent(MAP_ZOOM_CHANGE_EVENT, {
+    detail: { scale: newScale }
+  }));
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Références DOM (changent si la page est détruite/recréée)                  */
+/* -------------------------------------------------------------------------- */
+
+// Sélectionne les deux éléments principaux de la structure DOM
+let viewport = null; // la zone visible, qui sert de "fenêtre"
+let map = null;      // le contenu qu'on va déplacer et zoomer
+
+// Pour éviter les doublons si initMapLogic est appelé plusieurs fois
+let cleanup = null;
+
+/* -------------------------------------------------------------------------- */
+/*  État persistant entre navigations (tant que l'app tourne)                  */
+/* -------------------------------------------------------------------------- */
+
+export const mapState = {
+  /**
+   * Indique si on a déjà sauvegardé un état utilisable (retour sur la page).
+   * - false : première ouverture => on applique initialView
+   * - true  : on restaure originX/originY/scale sauvegardés
+   */
+  hasSavedState: false,
+
+  /** Dernier zoom connu */
+  scale: 1,
+
+  /** Dernière translation connue */
+  originX: 0,
+  originY: 0,
+
+  /**
+   * NOUVEAU : point de map "logique" qu'on veut garder au centre lors des resize (optionnel).
+   * On va recalculer originX/originY
+   * pour conserver ce point au centre du viewport après resize, au lieu de simplement "bounds".
+   *
+   * Ces valeurs sont exprimées en px dans la map non-scalée (repère scale=1).
+   */
+  centerMapX: null,
+  centerMapY: null
+};
+
+/* -------------------------------------------------------------------------- */
+/*  Vue initiale device-independent                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Vue initiale (première ouverture uniquement).
+ * - centerMapX / centerMapY : point de la carte (px dans la map à scale=1) qu'on veut centrer.
+ * - scale : zoom initial souhaité.
+ *
+ * IMPORTANT :
+ * - centerMapX/Y sont robustes aux changements de device/ratio, car on reconvertit vers originX/Y
+ *   en fonction de la taille du viewport à l'instant T.
+ */
+const initialView = {
+  scale: 1.2,
+
+  // Exemple : ton point d'intérêt dans la carte (px map à scale=1)
+  // (Tu ajusteras ces valeurs une fois que tu as repéré le bon point.)
+  centerMapX: 961,
+  centerMapY: 3904
+};
+
+let mapApi = null; // sera rempli par initMapLogic()
+
+
+/* -------------------------------------------------------------------------- */
+/*  Fonctions utilitaires "géométrie"                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Convertit un point exprimé en "px de map" (scale=1) vers originX/originY
+ * pour que ce point se retrouve AU CENTRE du viewport, au zoom demandé.
+ *
+ * @param {Object} params
+ * @param {number} params.centerMapX - X du point sur la map (px en repère scale=1)
+ * @param {number} params.centerMapY - Y du point sur la map (px en repère scale=1)
+ * @param {number} params.scale      - zoom souhaité
+ * @param {number} params.viewportWidth  - largeur actuelle du viewport
+ * @param {number} params.viewportHeight - hauteur actuelle du viewport
+ * @returns {{ originX: number, originY: number }}
+ *
+ * Explication :
+ * - À scale=1, le point map (centerMapX, centerMapY) est à ces coordonnées.
+ * - À un scale donné, ce point se trouve visuellement à (centerMapX*scale, centerMapY*scale) dans l'espace map.
+ * - Pour que ce point tombe au centre du viewport (viewportWidth/2, viewportHeight/2),
+ *   il faut que la translation (originX/originY) satisfasse :
+ *
+ *   originX + centerMapX*scale = viewportWidth/2
+ *   originY + centerMapY*scale = viewportHeight/2
+ *
+ *  donc :
+ *   originX = viewportWidth/2  - centerMapX*scale
+ *   originY = viewportHeight/2 - centerMapY*scale
+ */
+function computeOriginToCenterMapPoint({
+  centerMapX,
+  centerMapY,
+  scale,
+  viewportWidth,
+  viewportHeight
+}) {
+  return {
+    originX: (viewportWidth / 2) - (centerMapX * scale),
+    originY: (viewportHeight / 2) - (centerMapY * scale)
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  API PUBLIQUE                                                               */
+/* -------------------------------------------------------------------------- */
+
+export function initMapLogic() {
+  /* ------------------------------------------------------------------------ */
+  /*  Sécurité : si init appelé 2 fois, on détruit l'instance précédente       */
+  /* ------------------------------------------------------------------------ */
+
+  if (cleanup) cleanup();
+
+  viewport = document.querySelector('.map-viewport');
+  map = document.querySelector('.map');
+
+  // Si la page n'a pas rendu la map (ou sélecteurs faux), on stop
+  if (!viewport || !map) {
+    cleanup = null;
+    return;
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /*  Variables "locales" à l'instance map (capturées par closures handlers)   */
+  /* ------------------------------------------------------------------------ */
+
+  // État instantané
+  let scale = 1;
+  let originX = 0;
+  let originY = 0;
+  let lastTouches = [];
+
+  /**
+   * -------------------------
+   * Desktop (souris)
+   * -------------------------
+   * isMouseDragging : vrai quand on drag la map à la souris
+   */
+  let isMouseDragging = false;
+  // Dernière position souris (repère viewport)
+  let lastMouseX = 0;
+  let lastMouseY = 0;
+  // Timing pour estimer la vitesse sur desktop
+  let lastMouseMoveTime = 0;
+
+  /**
+   * -------------------------
+   * Momentum (inertie)
+   * -------------------------
+   * vx/vy : vitesse instantanée en px/ms (pixels par milliseconde)
+   * lastMoveTime : timestamp du dernier move utilisé pour estimer dt
+   * isDragging : vrai quand un pan 1 doigt est en cours
+   * isMomentumActive : vrai quand l'inertie tourne après relâchement
+   */
+  let velocityX = 0;
+  let velocityY = 0;
+  let lastMoveTime = 0;
+
+  let isDragging = false;
+  let isMomentumActive = false; 
+
+  // Dernier zoom “émis” pour éviter les triggers inutiles
+  let lastEmittedScale = scale;
+  let lastZoomEmitTime = 0;
+  
+  // --- Configuration ---
+  let MIN_SCALE = 0.17;         // recalculé via contain
+  const MAX_SCALE = 2.5;
+  const REBOUND_STRENGTH = 0.2; // 0 = snap dur, 1 = jamais de correction
+  /**
+   * Réglages inertie
+   * - FRICTION : facteur multiplicatif appliqué à chaque frame (plus petit => s'arrête plus vite)
+   * - STOP_SPEED : seuil en px/ms sous lequel on stoppe
+   */
+  const MOMENTUM_FRICTION = 0.92;
+  const MOMENTUM_STOP_SPEED = 0.02; // ~0.02 px/ms = 20px/s
+
+  /* ------------------------------------------------------------------------ */
+  /*  Fonctions utilitaires tactiles                                          */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Retourne le centre entre deux doigts, en coordonnées LOCALES au viewport.
+   * @param {Touch} touch1
+   * @param {Touch} touch2
+   * @returns {{x:number,y:number}}
+   */
+  function getTouchesCenter(touch1, touch2) {
+    // getBoundingClientRect donne la position du viewport dans la fenêtre
+    const rect = viewport.getBoundingClientRect();
+
+    // On convertit clientX/clientY (repère fenêtre) -> repère local viewport
+    return {
+      x: ((touch1.clientX + touch2.clientX) / 2) - rect.left,
+      y: ((touch1.clientY + touch2.clientY) / 2) - rect.top
+    };
+  }
+
+   /**
+   * Convertit la position souris (clientX/clientY) en coordonnées LOCALES au viewport.
+   * @param {MouseEvent|WheelEvent} event
+   * @returns {{x:number, y:number}}
+   */
+  function getPointerPositionInViewport(event) {
+    const rect = viewport.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    };
+  }
+
+  function emitZoomChangeIfNeeded() {
+    // Évite le bruit des floats (0.0000001 etc.)
+    const EPS = 0.001;
+
+    const now = performance.now();
+    const THROTTLE_MS = 33;
+
+    if (Math.abs(scale - lastEmittedScale) <= EPS) return;
+    if (now - lastZoomEmitTime < THROTTLE_MS) return;
+
+    lastEmittedScale = scale;
+    lastZoomEmitTime = now;
+
+    emitZoomChange(scale);
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /*  Transform + Bounds                                                      */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Applique la transformation courante à la map.
+   * (translate d'abord, scale ensuite, avec transform-origin: 0 0)
+   */
+  function applyTransform() {
+    map.style.transform = `translate(${originX}px, ${originY}px) scale(${scale})`;
+  }
+
+  /**
+   * Calcule MIN_SCALE en mode "contain" :
+   * - MIN_SCALE = zoom mini pour que la map entière soit visible dans le viewport.
+   * - Ne touche PAS à originX/originY/scale, c'est volontaire.
+   */
+  function computeContainMinScale() {
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+    const mapWidth = map.clientWidth;
+    const mapHeight = map.clientHeight;
+
+    const containScale = Math.min(viewportWidth / mapWidth, viewportHeight / mapHeight);
+    MIN_SCALE = containScale;
+  }
+
+  /**
+   * Ramène la map dans les limites (rebond doux).
+   * - Si map < viewport sur un axe : on centre sur cet axe (pas de pan possible sur cet axe)
+   * - Sinon : clamp entre [viewport - map, 0]
+   */
+  function applyBounds() {
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+
+    // Dimensions visibles de la map à l'échelle courante
+    const scaledMapWidth = map.clientWidth * scale;
+    const scaledMapHeight = map.clientHeight * scale;
+
+    /* ------------------ Axe X ------------------ */
+
+    // Si la map est plus petite que le viewport : cible = centrage
+    const centeredX = (viewportWidth - scaledMapWidth) / 2;
+
+    // Si la map est plus grande : clamp dans [minX, maxX] = [viewport - map, 0]
+    const minX = viewportWidth - scaledMapWidth;
+    const maxX = 0;
+
+    // Valeur "cible" (clampée ou centrée)
+    const clampedX =
+      (scaledMapWidth <= viewportWidth)
+        ? centeredX
+        : Math.min(Math.max(originX, minX), maxX);
+
+    /* ------------------ Axe Y ------------------ */
+
+    const centeredY = (viewportHeight - scaledMapHeight) / 2;
+    const minY = viewportHeight - scaledMapHeight;
+    const maxY = 0;
+
+    const clampedY =
+      (scaledMapHeight <= viewportHeight)
+        ? centeredY
+        : Math.min(Math.max(originY, minY), maxY);
+
+    /* ------------------ Rebond doux ------------------ */
+
+    originX += (clampedX - originX) * REBOUND_STRENGTH;
+    originY += (clampedY - originY) * REBOUND_STRENGTH;
+
+    applyTransform();
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /*  Persistance état                                                        */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Sauvegarde la vue courante (scale + origin) dans l'état persistant.
+   */
+  function saveState() {
+    mapState.scale = scale;
+    mapState.originX = originX;
+    mapState.originY = originY;
+  }
+
+  /**
+   * NOUVEAU :
+   * Mets à jour mapState.centerMapX / centerMapY en fonction de la vue actuelle,
+   * en considérant que le centre du viewport correspond à un point sur la map.
+   *
+   * But :
+   * - pouvoir restaurer un "point logique" lors d'un resize
+   *
+   * Formule inverse :
+   *  originX + mapX*scale = viewportWidth/2  => mapX = (viewportWidth/2 - originX)/scale
+   *  originY + mapY*scale = viewportHeight/2 => mapY = (viewportHeight/2 - originY)/scale
+   */
+  function updateCenteredMapPointInState() {
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+
+    mapState.centerMapX = (viewportWidth / 2 - originX) / scale;
+    mapState.centerMapY = (viewportHeight / 2 - originY) / scale;
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /*  Init / Restore                                                          */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Applique une vue définie par un point map (px map à scale=1) centré à l'écran.
+   *
+   * @param {Object} view
+   * @param {number} view.centerMapX - point map X (px repère map non scalée)
+   * @param {number} view.centerMapY - point map Y (px repère map non scalée)
+   * @param {number} view.scale      - zoom
+   */
+  function applyViewByMapPoint(view) {
+    // 1) Borne le scale dans [MIN_SCALE, MAX_SCALE]
+    scale = Math.min(Math.max(view.scale, MIN_SCALE), MAX_SCALE);
+
+    // 2) Calcule originX/originY pour centrer ce point dans le viewport courant
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+
+    const computed = computeOriginToCenterMapPoint({
+      centerMapX: view.centerMapX,
+      centerMapY: view.centerMapY,
+      scale,
+      viewportWidth,
+      viewportHeight
+    });
+
+    originX = computed.originX;
+    originY = computed.originY;
+
+    // 3) Applique bounds pour garantir qu'on est dans les limites
+    applyBounds();
+
+    // 4) Sauvegarde le "point logique" centré (utile pour resize)
+    updateCenteredMapPointInState();
+  }
+
+  /**
+   * Restaure l'état précédent si existant, sinon applique la vue initiale.
+   * IMPORTANT :
+   * - L'initialView est maintenant "device-independent" car basée sur un point map.
+   */
+  function restoreOrInitView() {
+    // Cas 1 : retour sur page -> on restaure originX/originY/scale
+    if (mapState.hasSavedState) {
+      scale = mapState.scale;
+      originX = mapState.originX;
+      originY = mapState.originY;
+
+      // Borne le zoom + bounds
+      scale = Math.min(Math.max(scale, MIN_SCALE), MAX_SCALE);
+      applyBounds();
+
+      // On met à jour le point logique centré (utile pour resize)
+      updateCenteredMapPointInState();
+      return;
+    }
+
+    // Cas 2 : première ouverture -> on applique la vue initiale via point map
+    applyViewByMapPoint({
+      centerMapX: initialView.centerMapX,
+      centerMapY: initialView.centerMapY,
+      scale: initialView.scale
+    });
+
+    // On marque comme sauvegardé pour la prochaine fois
+    mapState.hasSavedState = true;
+
+    // On sauvegarde l'état initial
+    saveState();
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /*  Handlers                                                                */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Touch start :
+   * - 1 doigt : mémoriser la position
+   * - 2 doigts : mémoriser les deux positions
+   */
+  function onTouchStart(event) {
+    // Dès que l'utilisateur retouche, on stoppe l'inertie en cours
+    isMomentumActive = false;
+    velocityX = 0;
+    velocityY = 0;
+
+    if (event.touches.length === 1) {
+      lastTouches = [event.touches[0]];
+      isDragging = true;
+      lastMoveTime = performance.now();
+    } else if (event.touches.length === 2) {
+      lastTouches = [...event.touches];
+      isDragging = false;
+    }
+  }
+
+  /**
+   * Touch move :
+   * - 1 doigt : pan
+   * - 2 doigts : pinch zoom centré sous les doigts (comportement map)
+   */
+  function onTouchMove(event) {
+    // IMPORTANT : nécessite { passive: false } sur touchmove
+    event.preventDefault();
+
+    /* ------------------ Pan 1 doigt ------------------ */
+    if (event.touches.length === 1 && lastTouches.length === 1) {
+      const now = performance.now();
+      const dt = Math.max(1, now - lastMoveTime); // ms, évite division par 0
+
+      const deltaX = event.touches[0].clientX - lastTouches[0].clientX;
+      const deltaY = event.touches[0].clientY - lastTouches[0].clientY;
+
+      originX += deltaX;
+      originY += deltaY;
+
+      // Vitesse en px/ms (on lisse un peu pour éviter les pics)
+      const instantVX = deltaX / dt;
+      const instantVY = deltaY / dt;
+
+      // Lissage simple (low-pass) pour un momentum plus naturel
+      velocityX = velocityX * 0.7 + instantVX * 0.3;
+      velocityY = velocityY * 0.7 + instantVY * 0.3;
+
+      lastMoveTime = now;
+      lastTouches = [event.touches[0]];
+    }
+
+    /* ------------------ Pinch 2 doigts ------------------ */
+    if (event.touches.length === 2 && lastTouches.length === 2) {
+      // Pendant un pinch, on ne veut pas de momentum de pan
+      velocityX = 0;
+      velocityY = 0;
+      isDragging = false;
+
+      // Distance précédente entre doigts
+      const previousDistance = Math.hypot(
+        lastTouches[0].clientX - lastTouches[1].clientX,
+        lastTouches[0].clientY - lastTouches[1].clientY
+      );
+
+      // Distance courante entre doigts
+      const currentDistance = Math.hypot(
+        event.touches[0].clientX - event.touches[1].clientX,
+        event.touches[0].clientY - event.touches[1].clientY
+      );
+
+      // Centres précédent/courant (repère local viewport)
+      const previousCenter = getTouchesCenter(lastTouches[0], lastTouches[1]);
+      const currentCenter = getTouchesCenter(event.touches[0], event.touches[1]);
+
+      // Calcul zoom
+      const zoomFactor = currentDistance / previousDistance;
+      const newScale = Math.min(Math.max(scale * zoomFactor, MIN_SCALE), MAX_SCALE);
+
+      // Déplacement naturel du centre (si les doigts bougent pendant le pinch)
+      const dx = currentCenter.x - previousCenter.x;
+      const dy = currentCenter.y - previousCenter.y;
+      originX += dx;
+      originY += dy;
+
+      // Zoom autour du centre courant
+      const scaleChange = newScale / scale;
+      originX = currentCenter.x - (currentCenter.x - originX) * scaleChange;
+      originY = currentCenter.y - (currentCenter.y - originY) * scaleChange;
+
+      // Commit
+      scale = newScale;
+      lastTouches = [...event.touches];
+
+      emitZoomChangeIfNeeded();
+    }
+
+    // Bounds + persistance
+    applyBounds();
+    updateCenteredMapPointInState(); // on garde le point logique centré à jour
+    saveState();
+  }
+
+  /**
+   * Touch end : reset lastTouches
+   */
+    function onTouchEnd() {
+    lastTouches = [];
+
+    // Fin de drag 1 doigt : on active le momentum si la vitesse est significative
+    if (isDragging) {
+      isDragging = false;
+
+      const speed = Math.hypot(velocityX, velocityY); // px/ms
+
+      // Si l'utilisateur a vraiment "lancé" la map, on enclenche l'inertie
+      if (speed > MOMENTUM_STOP_SPEED) {
+        isMomentumActive = true;
+      } else {
+        // Sinon on nettoie
+        isMomentumActive = false;
+        velocityX = 0;
+        velocityY = 0;
+      }
+    }
+  }
+
+    /**
+   * Début drag souris (bouton gauche)
+   */
+  function onMouseDown(event) {
+    // Seulement bouton gauche
+    if (event.button !== 0) return;
+
+    // Évite sélection de texte / drag d'image involontaire
+    event.preventDefault();
+
+    // Stoppe inertie tactile si besoin
+    isMomentumActive = false;
+    velocityX = 0;
+    velocityY = 0;
+
+    isMouseDragging = true;
+    viewport.classList.toggle('is-dragging', isMouseDragging);
+
+    const pointer = getPointerPositionInViewport(event);
+    lastMouseX = pointer.x;
+    lastMouseY = pointer.y;
+
+    lastMouseMoveTime = performance.now();
+  }
+
+  /**
+   * Drag souris
+   */
+  function onMouseMove(event) {
+    if (!isMouseDragging) return;
+
+    event.preventDefault();
+
+    const pointer = getPointerPositionInViewport(event);
+
+    const now = performance.now();
+    const dt = Math.max(1, now - lastMouseMoveTime);
+
+    const deltaX = pointer.x - lastMouseX;
+    const deltaY = pointer.y - lastMouseY;
+
+    originX += deltaX;
+    originY += deltaY;
+
+    // Vitesse px/ms + lissage pour “feel” Leaflet/Maps
+    const instantVX = deltaX / dt;
+    const instantVY = deltaY / dt;
+
+    velocityX = velocityX * 0.7 + instantVX * 0.3;
+    velocityY = velocityY * 0.7 + instantVY * 0.3;
+
+    lastMouseX = pointer.x;
+    lastMouseY = pointer.y;
+    lastMouseMoveTime = now;
+
+    applyBounds();
+    updateCenteredMapPointInState();
+    saveState();
+  }
+
+  /**
+   * Fin drag souris
+   */
+  function onMouseUp() {
+    if (!isMouseDragging) return;
+
+    isMouseDragging = false;
+    viewport.classList.toggle('is-dragging', isMouseDragging);
+
+    // Temps écoulé depuis le dernier mouvement réel de souris
+    const now = performance.now();
+    const idleMs = now - lastMouseMoveTime;
+
+    /**
+     * Si l'utilisateur n'a pas bougé depuis un petit moment avant de relâcher,
+     * c'est qu'il s'est "posé" => on annule le momentum.
+     *
+     * Ajuste ce seuil selon ton feeling :
+     * - 60ms : assez strict (momentum seulement si relâche rapide)
+     * - 120ms : plus permissif
+     */
+    const MOMENTUM_IDLE_CUTOFF_MS = 90;
+
+    if (idleMs > MOMENTUM_IDLE_CUTOFF_MS) {
+      isMomentumActive = false;
+      velocityX = 0;
+      velocityY = 0;
+      return;
+    }
+
+    /**
+     * Sinon, on atténue la vitesse selon le temps "sans mouvement".
+     * On simule une friction appliquée pendant idleMs.
+     *
+     * On approxime 60fps => 16ms par frame.
+     * plus idleMs est grand, plus on réduit velocity.
+     */
+    const frames = idleMs / 16;
+    const decay = Math.pow(MOMENTUM_FRICTION, frames);
+    velocityX *= decay;
+    velocityY *= decay;
+
+    // Déclenche momentum seulement si vitesse significative
+    const speed = Math.hypot(velocityX, velocityY);
+    if (speed > MOMENTUM_STOP_SPEED) {
+      isMomentumActive = true;
+
+      // Important : reset le lastTime de la boucle rAF pour éviter un "saut" au premier frame
+      update.lastTime = 0;
+    } else {
+      isMomentumActive = false;
+      velocityX = 0;
+      velocityY = 0;
+    }
+  }
+
+
+  /**
+   * Sécurité : si la souris sort / blur, on stoppe le drag
+   */
+  function onMouseLeave() {
+    if (isMouseDragging) onMouseUp();
+  }
+
+  /**
+   * Wheel zoom (desktop / trackpad)
+   * - Zoom centré sur le pointeur (comme Google Maps)
+   * - Utilise la même mécanique que le pinch : on garde le point sous le pointeur stable
+   */
+  function onWheel(event) {
+    // Empêche le scroll de la page
+    event.preventDefault();
+
+    // Stoppe une inertie tactile en cours, l'utilisateur reprend la main
+    isMomentumActive = false;
+    velocityX = 0;
+    velocityY = 0;
+
+    const pointer = getPointerPositionInViewport(event);
+
+    // Sensibilité : trackpad vs molette
+    // deltaY > 0 => zoom out ; deltaY < 0 => zoom in
+    // On convertit deltaY en un facteur de zoom doux.
+    const zoomIntensity = 0.0015;
+    const zoomFactor = Math.exp(-event.deltaY * zoomIntensity);
+
+    const newScale = Math.min(Math.max(scale * zoomFactor, MIN_SCALE), MAX_SCALE);
+    const scaleChange = newScale / scale;
+
+    // On veut que le point sous la souris reste sous la souris après zoom :
+    // origin' = pointer - (pointer - origin) * scaleChange
+    originX = pointer.x - (pointer.x - originX) * scaleChange;
+    originY = pointer.y - (pointer.y - originY) * scaleChange;
+
+    scale = newScale;
+
+    emitZoomChangeIfNeeded();
+
+    applyBounds();
+    updateCenteredMapPointInState();
+    saveState();
+  }
+
+
+
+  /**
+   * Resize :
+   * - recalcul MIN_SCALE (contain)
+   * - puis :
+   *   - si KEEP_CENTER_POINT_ON_RESIZE et qu'on a un point logique : on le recentre
+   *   - sinon : clamp + bounds comme avant
+   */
+  function onResize() {
+    computeContainMinScale();
+
+    // Borne le zoom, au cas où MIN_SCALE a changé
+    scale = Math.min(Math.max(scale, MIN_SCALE), MAX_SCALE);
+
+    if (mapState.centerMapX != null && mapState.centerMapY != null) {
+      // On recentre le même point map au centre du nouveau viewport
+      applyViewByMapPoint({
+        centerMapX: mapState.centerMapX,
+        centerMapY: mapState.centerMapY,
+        scale
+      });
+    } else {
+      // Fallback : on conserve originX/originY tels quels, puis bounds
+      applyBounds();
+      updateCenteredMapPointInState();
+    }
+
+    saveState();
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /*  Attach listeners                                                        */
+  /* ------------------------------------------------------------------------ */
+
+  // Touchscreen
+  viewport.addEventListener('touchstart', onTouchStart, { passive: true });
+  viewport.addEventListener('touchmove', onTouchMove, { passive: false }); // pour preventDefault()
+  viewport.addEventListener('touchend', onTouchEnd, { passive: true });
+
+  // Desktop : wheel zoom
+  viewport.addEventListener('wheel', onWheel, { passive: false });
+
+  // Desktop : drag souris
+  viewport.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
+  viewport.addEventListener('mouseleave', onMouseLeave)
+
+  window.addEventListener('resize', onResize);
+
+  /* ------------------------------------------------------------------------ */
+  /*  Init (ordre important)                                                  */
+  /* ------------------------------------------------------------------------ */
+
+  // 1) Calcule MIN_SCALE contain selon viewport courant
+  computeContainMinScale();
+
+  // 2) Restore state ou apply initial view (device-independent via point map)
+  restoreOrInitView();
+
+  /* ------------------------------------------------------------------------ */
+  /*  rAF rebond continu + stop si DOM détruit                                 */
+  /* ------------------------------------------------------------------------ */
+
+  let rafId = 0;
+
+  function update() {
+    // Si le DOM a été détruit (changement de page), on stop
+    if (!viewport || !map || !document.body.contains(viewport)) return;
+
+    // Si une inertie est active, on avance la map en fonction de la vitesse
+    if (isMomentumActive) {
+      // dt approx en ms : on peut considérer ~16ms, ou mesurer le vrai dt
+      // Ici on mesure pour un rendu stable
+      const now = performance.now();
+      update.lastTime = update.lastTime || now;
+      const dt = Math.min(32, now - update.lastTime); // clamp pour éviter les gros sauts
+      update.lastTime = now;
+
+      // Avance la map : origin += vitesse(px/ms) * dt(ms)
+      originX += velocityX * dt;
+      originY += velocityY * dt;
+
+      // Friction : la vitesse diminue progressivement
+      velocityX *= MOMENTUM_FRICTION;
+      velocityY *= MOMENTUM_FRICTION;
+
+      // Si la vitesse devient négligeable, on stoppe
+      const speed = Math.hypot(velocityX, velocityY);
+      if (speed < MOMENTUM_STOP_SPEED) {
+        isMomentumActive = false;
+        velocityX = 0;
+        velocityY = 0;
+      }
+
+      // Comme la vue a bougé, on met à jour le point centré + state
+      updateCenteredMapPointInState();
+      saveState();
+    }
+
+
+    // Permet de "revenir" dans les bounds même après relâchement
+    applyBounds();
+
+    rafId = requestAnimationFrame(update);
+  }
+
+  rafId = requestAnimationFrame(update);
+
+  /* ------------------------------------------------------------------------ */
+  /*  Cleanup (IMPORTANT)                                                     */
+  /* ------------------------------------------------------------------------ */
+
+  cleanup = () => {
+    if (!viewport) return;
+
+    viewport.removeEventListener('touchstart', onTouchStart);
+    viewport.removeEventListener('touchmove', onTouchMove);
+    viewport.removeEventListener('touchend', onTouchEnd);
+
+    viewport.removeEventListener('wheel', onWheel);
+
+    viewport.removeEventListener('mousedown', onMouseDown);
+    window.removeEventListener('mousemove', onMouseMove);
+    window.removeEventListener('mouseup', onMouseUp);
+    viewport.removeEventListener('mouseleave', onMouseLeave);
+
+    window.removeEventListener('resize', onResize);
+
+    cancelAnimationFrame(rafId);
+
+    viewport = null;
+    map = null;
+    mapApi = null;
+    cleanup = null;
+  };
+
+  mapApi = {
+    setViewByMapPoint: ({ x, y, zoom }) => {
+      // MIN_SCALE est déjà calculé via computeContainMinScale() à l’init
+      // mais si tu appelles ça après un gros resize sans passer par onResize,
+      // tu peux recalculer pour être safe :
+      computeContainMinScale();
+
+      // clamp zoom
+      scale = Math.min(Math.max(zoom, MIN_SCALE), MAX_SCALE);
+
+      const viewportWidth = viewport.clientWidth;
+      const viewportHeight = viewport.clientHeight;
+
+      // centre (x,y) dans le viewport
+      const computed = computeOriginToCenterMapPoint({
+        centerMapX: x,
+        centerMapY: y,
+        scale,
+        viewportWidth,
+        viewportHeight
+      });
+
+      originX = computed.originX;
+      originY = computed.originY;
+
+      // bounds + applyTransform inclus
+      applyBounds();
+
+      // state + events
+      updateCenteredMapPointInState();
+      saveState();
+      emitZoomChangeIfNeeded();
+    },
+
+    // (optionnel) getter utile pour debug/UI
+    getState: () => ({ scale, originX, originY })
+  };
+}
+
+/**
+ * Détruit proprement la logique map (listeners + rAF).
+ * IMPORTANT : tu as demandé à ne pas renommer cette fonction.
+ */
+export function destroyMapLogic() {
+  if (cleanup) cleanup();
+}
+
+export function setMapToSpecificCoordinatesAndZoom(xCoord, yCoord, zoomLevel) {
+  if (!mapApi) return; // map pas initialisée ou détruite
+  mapApi.setViewByMapPoint({ x: xCoord, y: yCoord, zoom: zoomLevel });
+}
